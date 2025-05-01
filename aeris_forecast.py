@@ -1,45 +1,55 @@
+import requests
 import pandas as pd
 import numpy as np
-import time
-import joblib
-from sklearn.preprocessing import StandardScaler
-import requests
 from datetime import datetime, timedelta
-from urllib.parse import quote_plus
+import joblib
+import time
+from sklearn.preprocessing import StandardScaler
+from lightgbm import LGBMRegressor
 
-# Load the necessary files
-model = joblib.load('pm2_5_forecasting_model.pkl')
-used_features = joblib.load('used_features.pkl')
-scaler = StandardScaler()
+# Load model and feature info
+model = joblib.load("pm2_5_forecasting_model.pkl")
+used_features = joblib.load("used_features.pkl")
 
-# Constants
-API_KEY = "62067aa28e490926060739d6420d490a7ab08c2f"
-GEO_URL = "https://api.waqi.info/search/?keyword={city_name}&token={api_key}"
-CITY_COORDS_FILE = "city_coordinates_from_dataset.csv"
-OUTPUT_FILE = "forecasted_air_quality.csv"
+# Load city coordinates
+city_coords = pd.read_csv("city_coordinates_from_dataset.csv")
 
-def get_real_time_data(city_name):
-    """Fetch real-time air quality data for a given city."""
-    city_name_encoded = quote_plus(city_name)
-    url = GEO_URL.format(city_name=city_name_encoded, api_key=API_KEY)
-    
-    try:
-        response = requests.get(url)
-        data = response.json()
+def get_city_coordinates(city_name):
+    # Normalize and match city_name
+    row = city_coords[city_coords["city_name"].str.lower() == city_name.lower()]
+    if row.empty:
+        raise ValueError(f"City '{city_name}' not found in dataset.")
+    return row.iloc[0]["latitude"], row.iloc[0]["longitude"]
 
-        if data["status"] == "ok" and len(data["data"]) > 0:
-            lat = data["data"][0]["station"]["geo"][0]
-            lon = data["data"][0]["station"]["geo"][1]
-            return lat, lon
-        else:
-            print(f"❌ No real-time data found for {city_name}.")
-            return None, None
-    except Exception as e:
-        print(f"⚠️ Error fetching real-time data for {city_name}: {e}")
-        return None, None
+def get_real_time_pm25_open_meteo(lat, lon):
+    print(f"Fetching real-time PM2.5 data from Open-Meteo for coordinates ({lat}, {lon})...")
+    url = (
+        f"https://air-quality-api.open-meteo.com/v1/air-quality?latitude={lat}&longitude={lon}"
+        f"&hourly=pm2_5&timezone=Asia%2FManila"
+    )
+    response = requests.get(url)
+    if response.status_code != 200:
+        raise Exception(f"API Error: {response.status_code} - {response.text}")
 
-def classify_aqi(pm2_5):
-    """Classify the PM2.5 value into AQI categories."""
+    data = response.json()
+    timestamps = data.get("hourly", {}).get("time", [])
+    pm2_5_values = data.get("hourly", {}).get("pm2_5", [])
+
+    if not timestamps or not pm2_5_values:
+        raise Exception("PM2.5 data not available from Open-Meteo.")
+
+    current_time = datetime.now().strftime("%Y-%m-%dT%H:00")
+    if current_time in timestamps:
+        idx = timestamps.index(current_time)
+    else:
+        idx = len(pm2_5_values) - 1  # fallback to most recent
+
+    return {
+        "pm2_5": pm2_5_values[idx],
+        "timestamp": timestamps[idx].replace("T", " ")
+    }
+
+def classify_pm2_5(pm2_5):
     if pm2_5 <= 12:
         return "Good"
     elif pm2_5 <= 35.4:
@@ -53,82 +63,84 @@ def classify_aqi(pm2_5):
     else:
         return "Hazardous"
 
-def forecast_pm2_5(city_name, days_ahead=7):
-    """Forecast PM2.5 for the given city and the following days."""
-    # Load city coordinates from your dataset (you can merge city names and coordinates in advance)
-    city_coords_df = pd.read_csv(CITY_COORDS_FILE)
-    
-    city_coords = city_coords_df[city_coords_df["city_name"] == city_name]
-    
-    if city_coords.empty:
-        print(f"❌ City {city_name} not found in the dataset!")
-        return None
+def generate_features(city_name, pm2_5_current, timestamp, lat, lon):
+    current_dt = datetime.strptime(timestamp, "%Y-%m-%d %H:%M")
+    features = {
+        "main.aqi": np.nan,
+        "components.co": np.nan,
+        "components.no": np.nan,
+        "components.no2": np.nan,
+        "components.o3": np.nan,
+        "components.so2": np.nan,
+        "components.pm10": np.nan,
+        "components.nh3": np.nan,
+        "coord.lat": lat,
+        "coord.lon": lon,
+        "year": current_dt.year,
+        "month": current_dt.month,
+        "day": current_dt.day,
+        "hour": current_dt.hour,
+        "day_of_week": current_dt.weekday(),
+        "is_weekend": int(current_dt.weekday() >= 5),
+        "city_encoded": hash(city_name) % 1000,
+        "dayofweek": current_dt.weekday(),
+        "season_encoded": 0 if current_dt.month in [11, 12, 1, 2, 3, 4] else 1
+    }
 
-    lat, lon = city_coords.iloc[0]["latitude"], city_coords.iloc[0]["longitude"]
+    for lag in [1,2,3,4,6,8,12,24,36,48,72]:
+        features[f"pm2_5_lag_{lag}h"] = pm2_5_current
+    for window in [3, 6]:
+        features[f"pm2_5_roll_mean_{window}h"] = pm2_5_current
+    features["pm2_5_roll_std_6h"] = 0
+    features["pm2_5_roll_median_6h"] = pm2_5_current
+    features["pm2_5_roll_min_6h"] = pm2_5_current
+    features["pm2_5_roll_max_6h"] = pm2_5_current
+    features["pm2_5_city_roll_mean_3h"] = pm2_5_current
+    features["pm2_5_city_roll_std_3h"] = 0
+    features["pm2_5_city_roll_mean_6h"] = pm2_5_current
+    features["pm2_5_city_roll_std_6h"] = 0
+    features["lag_1h_x_lag_3h"] = pm2_5_current ** 2
+    features["lag_1h_div_lag_3h"] = 1.0
 
-    # Fetch real-time data (this will be the input for forecasting)
-    lat, lon = get_real_time_data(city_name)
-    
-    if lat is None or lon is None:
-        return None
-    
-    # Prepare a DataFrame for forecasting the next days
-    forecast_dates = [datetime.now() + timedelta(days=i) for i in range(days_ahead)]
-    
+    return pd.DataFrame([features])
+
+def forecast_pm2_5(city_name, days_ahead=3):
+    lat, lon = get_city_coordinates(city_name)
+    meteo_data = get_real_time_pm25_open_meteo(lat, lon)
+
+    print(f"Real-time PM2.5: {meteo_data['pm2_5']} µg/m³ at {meteo_data['timestamp']}")
+
     forecast_results = []
 
-    for forecast_date in forecast_dates:
-        # Prepare features for forecasting
-        # Create a DataFrame to match the model's input format
-        features = {
-            "latitude": [lat],
-            "longitude": [lon],
-            "year": [forecast_date.year],
-            "month": [forecast_date.month],
-            "day": [forecast_date.day],
-            "hour": [forecast_date.hour],
-            "day_of_week": [forecast_date.weekday()],
-            "is_weekend": [1 if forecast_date.weekday() >= 5 else 0],
-            "main.aqi": [None],  # No AQI value for real-time, will be predicted
-            "components.pm2_5": [None],  # Placeholder value for PM2.5, to be predicted
-        }
+    current_pm2_5 = meteo_data["pm2_5"]
+    current_time = meteo_data["timestamp"]
 
-        feature_df = pd.DataFrame(features)
+    for day in range(days_ahead):
+        timestamp = (datetime.strptime(current_time, "%Y-%m-%d %H:%M") + timedelta(days=day)).strftime("%Y-%m-%d %H:%M")
+        feature_df = generate_features(city_name, current_pm2_5, timestamp, lat, lon)
 
-        # Normalize the features using the scaler
-        feature_df_scaled = scaler.transform(feature_df[used_features])
+        feature_df = feature_df[[col for col in used_features if col in feature_df.columns]]
+        feature_df = feature_df.fillna(0)
 
-        # Make a prediction for PM2.5
-        pm2_5_prediction = model.predict(feature_df_scaled)[0]
+        scaler = StandardScaler()
+        feature_scaled = scaler.fit_transform(feature_df)
 
-        # Classify the PM2.5 prediction
-        aqi_category = classify_aqi(pm2_5_prediction)
+        pm2_5_pred = model.predict(feature_scaled)[0]
+        category = classify_pm2_5(pm2_5_pred)
 
         forecast_results.append({
-            "city_name": city_name,
-            "date": forecast_date.strftime('%Y-%m-%d'),
-            "pm2_5_prediction": pm2_5_prediction,
-            "aqi_category": aqi_category
+            "date": timestamp.split(" ")[0],
+            "predicted_pm2_5": round(pm2_5_pred, 2),
+            "category": category
         })
 
-        time.sleep(1)  # To avoid hitting the API limit
-
-    # Save the forecast results to a CSV file
-    forecast_df = pd.DataFrame(forecast_results)
-    forecast_df.to_csv(OUTPUT_FILE, index=False)
-
-    print(f"\n✅ Forecast for {city_name} saved to {OUTPUT_FILE}")
-    return forecast_df
+    return pd.DataFrame(forecast_results)
 
 def main():
-    # Accept user input for city name
-    city_name = input("Enter the city name (e.g., Manila, Cebu City, etc.): ").strip()
-
-    # Forecast PM2.5 and AQI for the next 7 days
-    forecast_df = forecast_pm2_5(city_name, days_ahead=7)
-
-    if forecast_df is not None:
-        print(forecast_df)
+    city_name = input("Enter the city name (e.g., Manila, Cebu City, etc.): ")
+    forecast_df = forecast_pm2_5(city_name, days_ahead=3)
+    print("\nAir Quality Forecast:")
+    print(forecast_df)
 
 if __name__ == "__main__":
     main()
