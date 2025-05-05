@@ -36,3 +36,9 @@ def load_and_clean_data(filepath):
     joblib.dump(le, "city_label_encoder.pkl")
 
     return df
+def get_city_coordinates(city_name, coord_df):
+    match = coord_df[coord_df['city_name'].str.lower() == city_name.lower()]
+    if not match.empty:
+        return match.iloc[0]['latitude'], match.iloc[0]['longitude']
+    else:
+        raise ValueError(f"City '{city_name}' not found in coordinates file.")
