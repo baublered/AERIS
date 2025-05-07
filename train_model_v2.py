@@ -1,75 +1,60 @@
 import pandas as pd
-import numpy as np
-from lightgbm import LGBMRegressor
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import LabelEncoder
-import joblib
+import lightgbm as lgb
 import pickle
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_squared_error, r2_score
 
-# Load data
-df = pd.read_csv("cleaned_air_quality_data.csv")
-df['datetime'] = pd.to_datetime(df['datetime'])
+# Load processed dataset
+df = pd.read_csv("processed_training_data.csv")
 
-# Rename column for easier handling
-df['pm2_5'] = df['components.pm2_5']
+# Load used features
+with open("used_features.pkl", "rb") as f:
+    features = pickle.load(f)
 
-# Label encode city
-le = LabelEncoder()
-df['city_encoded'] = le.fit_transform(df['city_name'])
+# Target and features
+target = "components.pm2_5"
+X = df[features]
+y = df[target]
 
-# Feature engineering (lags)
-lags = [1, 2, 3, 4, 24]
-for lag in lags:
-    df[f'pm2_5_lag_{lag}h'] = df.groupby('city_name')['pm2_5'].shift(lag)
+# Split data
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
-# Rolling features (based on shifted values to prevent leakage)
-df['pm2_5_roll_mean_3h'] = df.groupby('city_name')['pm2_5'].shift(1).rolling(3).mean()
-df['pm2_5_roll_median_6h'] = df.groupby('city_name')['pm2_5'].shift(1).rolling(6).median()
-df['pm2_5_roll_min_6h'] = df.groupby('city_name')['pm2_5'].shift(1).rolling(6).min()
-df['pm2_5_roll_max_6h'] = df.groupby('city_name')['pm2_5'].shift(1).rolling(6).max()
-df['pm2_5_roll_std_6h'] = df.groupby('city_name')['pm2_5'].shift(1).rolling(6).std()
+# LightGBM datasets
+lgb_train = lgb.Dataset(X_train, y_train)
+lgb_eval = lgb.Dataset(X_test, y_test, reference=lgb_train)
 
-# Drop rows with NaNs from lag/rolling generation
-df.dropna(inplace=True)
+# LightGBM parameters
+params = {
+    "objective": "regression",
+    "metric": "rmse",
+    "verbosity": -1,
+    "boosting_type": "gbdt",
+    "learning_rate": 0.07,
+    "num_leaves": 31,
+    "feature_fraction": 0.9,
+    "bagging_fraction": 0.8,
+    "bagging_freq": 5,
+    "seed": 42
+}
 
-# Split train/test chronologically
-train_df, test_df = train_test_split(df, test_size=0.2, shuffle=False)
+# Train with early stopping as a callback
+model = lgb.train(
+    params,
+    lgb_train,
+    num_boost_round=1000,
+    valid_sets=[lgb_train, lgb_eval],
+    callbacks=[lgb.early_stopping(stopping_rounds=50), lgb.log_evaluation(100)]
+)
 
-# Define features
-features = [
-    'city_encoded', 'hour', 'day_of_week', 'month', 'is_weekend',
-    'pm2_5_lag_1h', 'pm2_5_lag_2h', 'pm2_5_lag_3h', 'pm2_5_lag_4h', 'pm2_5_lag_24h',
-    'pm2_5_roll_mean_3h', 'pm2_5_roll_median_6h', 'pm2_5_roll_min_6h',
-    'pm2_5_roll_max_6h', 'pm2_5_roll_std_6h'
-]
-
-# Prepare training data
-X_train = train_df[features].copy()
-y_train = train_df['pm2_5'].copy()
-
-# Initialize LightGBM model
-model = LGBMRegressor(n_estimators=100)
-
-# --- 🧠 Teacher-forcing loop ---
-teacher_forcing_ratio = 0.5
-X_simulated = X_train.copy()
-
-for i in range(5):  # multiple passes to simulate recursive lags
-    model.fit(X_simulated, y_train)
-
-    for lag_feature in [f'pm2_5_lag_{lag}h' for lag in lags]:
-        if np.random.rand() > teacher_forcing_ratio:
-            predictions = model.predict(X_simulated)
-            X_simulated[lag_feature] = predictions  # replace lag with simulated value
-
-# Final model fit with simulated lags
-model.fit(X_simulated, y_train)
-
-# Save model and artifacts
-with open("pm2_5_model_recursive.pkl", "wb") as f:
+# Save model
+with open("pm2_5_forecasting_model.pkl", "wb") as f:
     pickle.dump(model, f)
 
-with open("used_features_recursive.pkl", "wb") as f:
-    pickle.dump(features, f)
+# Evaluate
+y_pred = model.predict(X_test)
+rmse = mean_squared_error(y_test, y_pred, squared=False)
+r2 = r2_score(y_test, y_pred)
 
-joblib.dump(le, "city_label_encoder.pkl")
+print(f"✅ Model trained and saved as 'pm2_5_forecasting_model.pkl'")
+print(f"📉 RMSE: {rmse:.2f}")
+print(f"📈 R² Score: {r2:.2f}")

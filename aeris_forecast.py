@@ -14,50 +14,50 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
 # Load necessary files
 try:
-    with open('pm2_5_model_daily.pkl', 'rb') as f:
+    with open('pm2_5_forecasting_model.pkl', 'rb') as f:
         model: Booster = pickle.load(f)
-    with open('used_features_daily.pkl', 'rb') as f:
+    # IMPORTANT: Ensure this is the correct pkl file with 13 features
+    with open('used_features.pkl', 'rb') as f: # Assuming you renamed it or this is the correct one
         used_features = pickle.load(f)
     city_encoder = joblib.load("city_label_encoder.pkl")
     city_coords = pd.read_csv('city_coordinates_from_dataset.csv')
 
-# Get the list of cities from the dataset
     cities_list = city_coords['city_name'].tolist()
+
+    if model:
+        pass # Model loaded successfully.
+
 except FileNotFoundError as e:
     print(f"Error: A required file was not found: {e.filename}")
-    print("Please ensure required files are in the same directory as the script.")
+    print("Please ensure required files ('pm2_5_forecasting_model.pkl', 'used_features.pkl', 'city_label_encoder.pkl', 'city_coordinates_from_dataset.csv') are in the same directory as the script.")
+    exit()
+except Exception as e:
+    print(f"An error occurred during initial file loading: {e}")
     exit()
 
-# AQI classification thresholds
 def classify_pm2_5(value):
-    if value is None:
-        return "Unknown"
-    if value <= 12:
-        return "Good"
-    elif value <= 35.4:
-        return "Moderate"
-    elif value <= 55.4:
-        return "Poor"
-    else:
-        return "Hazardous"
+    if value is None: return "Unknown"
+    if value <= 12: return "Good"
+    elif value <= 35.4: return "Moderate"
+    elif value <= 55.4: return "Poor"
+    else: return "Hazardous"
 
-# Time-based features
 def create_time_features(df):
     if not pd.api.types.is_datetime64_any_dtype(df['datetime']):
         df['datetime'] = pd.to_datetime(df['datetime'])
-    df['hour'] = df['datetime'].dt.hour
-    df['dayofweek'] = df['datetime'].dt.dayofweek
+    # df['hour'] = df['datetime'].dt.hour # 'hour' is not in the new used_features
+    df['day_of_week'] = df['datetime'].dt.dayofweek # Matches 'day_of_week' in used_features
     df['month'] = df['datetime'].dt.month
-    df['is_weekend'] = df['dayofweek'].isin([5, 6]).astype(int)
+    df['is_weekend'] = df['datetime'].dt.dayofweek.isin([5, 6]).astype(int)
     return df
 
-# Fetch real-time PM2.5 from Open-Meteo
-def fetch_realtime_pm2_5(city_name_input):
-    city_column_actual_name = next(
-        (col for col in city_coords.columns if col.lower() == "city_name"), None
-    )
+OPENWEATHERMAP_API_KEY = "046db00705c9a85bd3daa1f61ea04d4a" # Replace with your actual key
+OPENWEATHERMAP_API_URL = "http://api.openweathermap.org/data/2.5/air_pollution"
+
+def fetch_realtime_air_data(city_name_input):
+    city_column_actual_name = next((col for col in city_coords.columns if col.lower() == "city_name"), None)
     if not city_column_actual_name:
-        raise ValueError("Critical configuration error: 'city_name' column not found in coordinates file.")
+        raise ValueError("Critical: 'city_name' column not found in coordinates file.")
 
     city_data_row = city_coords.loc[city_coords[city_column_actual_name].str.lower() == city_name_input.lower()]
     if city_data_row.empty:
@@ -66,10 +66,7 @@ def fetch_realtime_pm2_5(city_name_input):
     lat = city_data_row.iloc[0]['latitude']
     lon = city_data_row.iloc[0]['longitude']
 
-    url = (
-        f"https://air-quality-api.open-meteo.com/v1/air-quality?"
-        f"latitude={lat}&longitude={lon}&hourly=pm2_5&timezone=Asia%2FManila&forecast_days=1"
-    )
+    url = f"{OPENWEATHERMAP_API_URL}?lat={lat}&lon={lon}&appid={OPENWEATHERMAP_API_KEY}"
     try:
         response = requests.get(url, timeout=10)
         response.raise_for_status()
@@ -77,124 +74,122 @@ def fetch_realtime_pm2_5(city_name_input):
     except requests.exceptions.RequestException as e:
         raise ValueError(f"API request failed for {city_name_input}: {e}")
 
-    if 'hourly' not in data or 'time' not in data['hourly'] or 'pm2_5' not in data['hourly']:
-        raise ValueError(f"PM2.5 data not found in API response structure for {city_name_input}.")
+    if 'list' not in data or not data['list'] or 'components' not in data['list'][0]:
+        raise ValueError(f"Unexpected API response format for {city_name_input}.")
 
-    times_raw = data['hourly']['time']
-    pm2_5_values_raw = data['hourly']['pm2_5']
-    if not times_raw or pm2_5_values_raw is None:
-        raise ValueError(f"API returned empty PM2.5 data for {city_name_input}.")
+    # Return the entire 'components' dictionary
+    return data['list'][0]['components']
 
-    times, pm2_5_values = [], []
-    for i, val_pm2_5 in enumerate(pm2_5_values_raw):
-        if val_pm2_5 is not None:
-            try:
-                times.append(pd.to_datetime(times_raw[i]))
-                pm2_5_values.append(float(val_pm2_5))
-            except (ValueError, TypeError):
-                continue
-
-    if not times:
-        raise ValueError(f"All PM2.5 data points were invalid for {city_name_input}.")
-
-    df = pd.DataFrame({'datetime': times, 'pm2_5': pm2_5_values})
-    return df.sort_values(by='datetime').reset_index(drop=True)
-
-# Forecast function
 def forecast_pm2_5(city):
     forecast_results = []
-    actual_values = []  # List to store actual values for performance evaluation
-    predicted_values = []  # List to store predicted values
-    latest_value_from_api = None  # Define it at the beginning
+    actual_values_for_metrics = []
+    predicted_values_for_metrics = []
 
     try:
-        # Fetch the real-time PM2.5 data
-        df_api_current = fetch_realtime_pm2_5(city)
-        if df_api_current.empty:
-            return {"error": f"No valid PM2.5 data returned from API for {city.title()}."}
+        current_air_components = fetch_realtime_air_data(city)
+        latest_pm2_5_value = current_air_components.get('pm2_5')
 
-        # Use daily average instead of single value
-        df_today = df_api_current[df_api_current['datetime'].dt.date == datetime.now().date()]
-        if df_today.empty:
-            return {"error": f"No PM2.5 data for today available from API for {city.title()}."}
-        latest_datetime_from_api = df_today['datetime'].max()
-        latest_value_from_api = df_today['pm2_5'].mean()
+        if latest_pm2_5_value is None:
+            return {"error": f"PM2.5 data not found in API response for {city.title()}."}
 
-        print(f"Real-time PM2.5 for {city.title()}: {latest_value_from_api:.2f} µg/m³")
-
-        previous_prediction = latest_value_from_api
+        # Initialize lags for recursive forecasting
+        # For the first day, pm2_5_lag1 is the current PM2.5, pm2_5_lag2 can also be set to current PM2.5
+        # or a historical value if available. We'll use current for simplicity here.
+        current_pm2_5_lag1 = latest_pm2_5_value
+        current_pm2_5_lag2 = latest_pm2_5_value # Assumption for the very first lag2 value
 
     except ValueError as e:
         return {"error": str(e)}
     except Exception as e:
-        return {"error": f"Unexpected error: {str(e)}"}
+        return {"error": f"Unexpected error during data fetching: {str(e)}"}
 
     city_lower = city.lower()
     try:
         correctly_cased_city = next(c for c in city_encoder.classes_ if c.lower() == city_lower)
         encoded_city = city_encoder.transform([correctly_cased_city])[0]
     except StopIteration:
-        known_cities_sample = ", ".join(list(city_encoder.classes_)[:5]) + ("..." if len(list(city_encoder.classes_)) > 5 else "")
-        return {"error": f"City '{city}' not found in the pre-trained city encoder. Known cities start with: {known_cities_sample}"}
+        return {"error": f"City '{city}' not recognized by city encoder."}
 
     current_processing_date = datetime.now().date()
 
-    # Add recursive forecasting for 3 days
-    for i in range(1, 4):
+    for i in range(1, 4): # Forecast for next 3 days
         future_date = current_processing_date + timedelta(days=i)
         forecast_datetime_obj = datetime.combine(future_date, datetime.min.time())
 
-        row_dict = {col: 0.0 for col in used_features}
-        row_dict['datetime'] = forecast_datetime_obj
-        row_dict['city_encoded'] = encoded_city
-        row_dict['pm2_5'] = previous_prediction
+        row_dict = {col: 0.0 for col in used_features} # Initialize with defaults
 
-        recent_pm2_5_approx = previous_prediction
-        for lag in ['pm2_5_lag_1h', 'pm2_5_lag_2h', 'pm2_5_lag_3h', 'pm2_5_lag_4h', 'pm2_5_lag_24h']:
-            if lag in used_features:
-                row_dict[lag] = recent_pm2_5_approx
-        for roll in ['pm2_5_roll_mean_3h', 'pm2_5_roll_median_6h', 'pm2_5_roll_min_6h', 'pm2_5_roll_max_6h']:
-            if roll in used_features:
-                row_dict[roll] = recent_pm2_5_approx
-        if 'pm2_5_roll_std_6h' in used_features:
-            row_dict['pm2_5_roll_std_6h'] = 0.0
+        # 1. Populate component features (using most recent API fetch for all forecast days)
+        #    Assumption: these components are relatively stable or their future values are not being predicted.
+        for comp_feature in ['components.pm10', 'components.no2', 'components.so2', 'components.co', 'components.o3', 'components.no', 'components.nh3']:
+            if comp_feature in used_features:
+                row_dict[comp_feature] = current_air_components.get(comp_feature.split('.')[-1], 0.0) # e.g. components.pm10 -> pm10
+
+        # 2. Populate time-related features (will be done by create_time_features later)
+        row_dict['datetime'] = forecast_datetime_obj # For create_time_features
+
+        # 3. Populate lag features
+        if 'pm2_5_lag1' in used_features:
+            row_dict['pm2_5_lag1'] = current_pm2_5_lag1
+        if 'pm2_5_lag2' in used_features:
+            row_dict['pm2_5_lag2'] = current_pm2_5_lag2
+
+        # 4. Populate city feature
+        #    Assumption: Model was trained with encoded city values under the column name 'city_name'
+        if 'city_name' in used_features:
+            row_dict['city_name'] = encoded_city
+        elif 'city_encoded' in used_features: # Fallback if old name still there
+            row_dict['city_encoded'] = encoded_city
+
 
         row_df = pd.DataFrame([row_dict])
-        row_df = create_time_features(row_df)
+        row_df = create_time_features(row_df) # Adds 'month', 'day_of_week', 'is_weekend'
+
+        # Ensure all expected features are present in row_df before selection
+        # This is crucial: `used_features` names must match columns available in `row_df`
+        missing_in_row_df = [col for col in used_features if col not in row_df.columns]
+        if missing_in_row_df:
+            return {"error": f"Feature engineering mismatch. Missing: {missing_in_row_df}"}
 
         try:
             row_df_ordered = row_df[used_features]
         except KeyError as e:
-            missing_cols = [col for col in used_features if col not in row_df.columns]
-            return {"error": f"Missing features in input: {missing_cols}"}
+            return {"error": f"KeyError during feature selection: {e}. Check `used_features` and `row_df` columns."}
 
-        model_prediction = model.predict(row_df_ordered)[0]
-        model_prediction = max(0.0, float(model_prediction))
-        corrected_prediction = 0.8 * latest_value_from_api + 0.2 * model_prediction
+        if row_df_ordered.shape[1] != model.num_feature():
+            return {"error": f"Feature count mismatch! Data has {row_df_ordered.shape[1]}, model expects {model.num_feature()}."}
+
+        model_prediction_raw = model.predict(row_df_ordered)[0]
+        model_prediction_processed = max(0.0, float(model_prediction_raw))
+
+        # Blending/Correction (optional, you might want to adjust or remove this)
+        # Using latest_pm2_5_value from the initial API call for blending across all days.
+        corrected_prediction = 0.8 * latest_pm2_5_value + 0.2 * model_prediction_processed
         predicted_pm2_5 = round(max(0.0, corrected_prediction), 2)
 
         forecast_results.append({
             "date": future_date.isoformat(),
-            "predicted_pm2_5": round(predicted_pm2_5, 2),
+            "predicted_pm2_5": predicted_pm2_5,
             "category": classify_pm2_5(predicted_pm2_5),
         })
 
-        # Append actual and predicted values for performance evaluation
-        actual_values.append(latest_value_from_api)
-        predicted_values.append(predicted_pm2_5)
+        actual_values_for_metrics.append(latest_pm2_5_value) # Using initial real-time as reference
+        predicted_values_for_metrics.append(predicted_pm2_5)
 
-        previous_prediction = predicted_pm2_5  # Update the previous prediction for the next day's forecast
+        # Update lags for the next iteration:
+        # The PM2.5 predicted for today becomes lag1 for tomorrow.
+        # Today's lag1 becomes lag2 for tomorrow.
+        current_pm2_5_lag2 = current_pm2_5_lag1
+        current_pm2_5_lag1 = predicted_pm2_5 # Use the blended/corrected prediction as the basis for next lag
 
-    # Performance evaluation metrics
-    mae = mean_absolute_error(actual_values, predicted_values)
-    rmse = np.sqrt(mean_squared_error(actual_values, predicted_values))
-    r2 = r2_score(actual_values, predicted_values)
+    if not actual_values_for_metrics or not predicted_values_for_metrics:
+        return {"error": "No forecast values generated."}
 
-    return forecast_results, mae, rmse, r2, latest_value_from_api
+    mae = mean_absolute_error(actual_values_for_metrics, predicted_values_for_metrics)
+    rmse = np.sqrt(mean_squared_error(actual_values_for_metrics, predicted_values_for_metrics))
+    r2 = r2_score(actual_values_for_metrics, predicted_values_for_metrics)
 
+    return forecast_results, mae, rmse, r2, latest_pm2_5_value
 
-
-# Tkinter GUI setup
 def show_forecast():
     city_input = city_combobox.get().strip()
     if not city_input:
@@ -206,50 +201,74 @@ def show_forecast():
         messagebox.showerror("Error", result["error"])
         return
 
-    forecast_results, mae, rmse, r2, latest_value_from_api = result
+    forecast_results, mae, rmse, r2, latest_pm2_5_api = result
 
-    # Display forecast and real-time PM2.5 in the output window
+    # Display text output
     output_text.delete(1.0, tk.END)
-    output_text.insert(tk.END, f"Real-time PM2.5 for {city_input.title()}: {latest_value_from_api:.2f} µg/m³\n")
-    output_text.insert(tk.END, f"PM2.5 Forecast for {city_input.title()}:\n")
-    
-    for day in forecast_results:
-        output_text.insert(tk.END, f"{day['date']}: {day['predicted_pm2_5']} µg/m³ ({day['category']})\n")
+    output_text.insert(tk.END, f"Real-time PM2.5 for {city_input.title()}: {latest_pm2_5_api:.2f} µg/m³\n\n")
+    for forecast in forecast_results:
+        output_text.insert(tk.END, f"Date: {forecast['date']}\n")
+        output_text.insert(tk.END, f"Predicted PM2.5: {forecast['predicted_pm2_5']} µg/m³\n")
+        output_text.insert(tk.END, f"Category: {forecast['category']}\n\n")
 
-    output_text.insert(tk.END, "\nPerformance Evaluation Metrics:\n")
-    output_text.insert(tk.END, f"MAE: {mae:.2f}\nRMSE: {rmse:.2f}\nR²: {r2:.2f}")
+    output_text.insert(tk.END, f"Model Performance (vs initial real-time PM2.5):\n")
+    output_text.insert(tk.END, f"MAE: {mae:.2f}\nRMSE: {rmse:.2f}\nR²: {r2:.2f}\n")
 
-    # Create a plot for the PM2.5 forecast
-    dates = [day['date'] for day in forecast_results]
-    predicted_pm2_5_values = [day['predicted_pm2_5'] for day in forecast_results]
+    # Generate and display plot
+    dates = [datetime.strptime(f['date'], '%Y-%m-%d') for f in forecast_results]
+    predicted_values = [f['predicted_pm2_5'] for f in forecast_results]
 
     fig, ax = plt.subplots(figsize=(6, 4))
-    ax.plot(dates, predicted_pm2_5_values, marker='o', color='b', label="Predicted PM2.5")
-    ax.set_title(f"PM2.5 Forecast for {city_input.title()}")
-    ax.set_xlabel('Date')
-    ax.set_ylabel('PM2.5 (µg/m³)')
+    ax.plot(dates, predicted_values, marker='o', linestyle='-', color='blue')
+    ax.set_title(f"3-Day PM2.5 Forecast for {city_input.title()}")
+    ax.set_xlabel("Date")
+    ax.set_ylabel("Predicted PM2.5 (µg/m³)")
     ax.grid(True)
-    ax.legend()
+    fig.autofmt_xdate() # Auto-format dates on x-axis
 
-    # Embed the plot into the Tkinter window
-    canvas = FigureCanvasTkAgg(fig, master=root)
+    # Embed plot in Tkinter window
+    # Clear previous plot
+    for widget in plot_frame.winfo_children():
+        widget.destroy()
+
+    canvas = FigureCanvasTkAgg(fig, master=plot_frame)
     canvas.draw()
-    canvas.get_tk_widget().pack(pady=20)
+    canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
-# Tkinter window
+
 root = tk.Tk()
-root.title("PM2.5 Forecast")
+root.title("AERIS - Real-time Air Quality Forecasting")
 
-tk.Label(root, text="Select a Philippine city:").pack(pady=5)
+# Create a main frame to hold everything
+main_frame = ttk.Frame(root, padding="10")
+main_frame.pack(fill=tk.BOTH, expand=True)
 
-# Dropdown for city selection
-city_combobox = ttk.Combobox(root, values=cities_list, width=40)
-city_combobox.pack(pady=5)
+# Create a frame for controls (city selection and button)
+control_frame = ttk.Frame(main_frame)
+control_frame.pack(pady=5)
 
-forecast_button = tk.Button(root, text="Get Forecast", command=show_forecast)
-forecast_button.pack(pady=10)
+city_label = tk.Label(control_frame, text="Select City:")
+city_label.pack(side=tk.LEFT, padx=5)
 
-output_text = tk.Text(root, height=15, width=50)
-output_text.pack(pady=10)
+city_combobox = ttk.Combobox(control_frame, values=cities_list, width=30)
+city_combobox.pack(side=tk.LEFT, padx=5)
+
+forecast_button = tk.Button(control_frame, text="Get Forecast", command=show_forecast)
+forecast_button.pack(side=tk.LEFT, padx=5)
+
+# Create a frame for text output and plot
+results_frame = ttk.Frame(main_frame)
+results_frame.pack(fill=tk.BOTH, expand=True, pady=10)
+
+# Frame for text output
+text_frame = ttk.LabelFrame(results_frame, text="Forecast Details", padding="10")
+text_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=5)
+
+output_text = tk.Text(text_frame, height=12, width=60)
+output_text.pack(fill=tk.BOTH, expand=True)
+
+# Frame for plot
+plot_frame = ttk.LabelFrame(results_frame, text="Forecast Visualization", padding="10")
+plot_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=5)
 
 root.mainloop()
