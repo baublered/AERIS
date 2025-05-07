@@ -26,6 +26,10 @@ def create_time_features(df):
     df["season"] = df["month"].apply(lambda x: "dry" if x in [11, 12, 1, 2, 3, 4, 5] else "wet")
     df["season_encoded"] = df["season"].map({"dry": 0, "wet": 1})
 
+    # Add year and day
+    df["year"] = df["datetime"].dt.year
+    df["day"] = df["datetime"].dt.day
+
     return df
 
 
