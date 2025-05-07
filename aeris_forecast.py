@@ -8,6 +8,7 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 import numpy as np
 import tkinter as tk
 from tkinter import messagebox
+from tkinter import ttk, messagebox
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
@@ -19,6 +20,9 @@ try:
         used_features = pickle.load(f)
     city_encoder = joblib.load("city_label_encoder.pkl")
     city_coords = pd.read_csv('city_coordinates_from_dataset.csv')
+
+# Get the list of cities from the dataset
+    cities_list = city_coords['city_name'].tolist()
 except FileNotFoundError as e:
     print(f"Error: A required file was not found: {e.filename}")
     print("Please ensure required files are in the same directory as the script.")
@@ -101,6 +105,7 @@ def forecast_pm2_5(city):
     forecast_results = []
     actual_values = []  # List to store actual values for performance evaluation
     predicted_values = []  # List to store predicted values
+    latest_value_from_api = None  # Define it at the beginning
 
     try:
         # Fetch the real-time PM2.5 data
@@ -134,6 +139,7 @@ def forecast_pm2_5(city):
 
     current_processing_date = datetime.now().date()
 
+    # Add recursive forecasting for 3 days
     for i in range(1, 4):
         future_date = current_processing_date + timedelta(days=i)
         forecast_datetime_obj = datetime.combine(future_date, datetime.min.time())
@@ -177,20 +183,22 @@ def forecast_pm2_5(city):
         actual_values.append(latest_value_from_api)
         predicted_values.append(predicted_pm2_5)
 
-        previous_prediction = predicted_pm2_5
+        previous_prediction = predicted_pm2_5  # Update the previous prediction for the next day's forecast
 
     # Performance evaluation metrics
     mae = mean_absolute_error(actual_values, predicted_values)
     rmse = np.sqrt(mean_squared_error(actual_values, predicted_values))
     r2 = r2_score(actual_values, predicted_values)
 
-    return forecast_results, mae, rmse, r2
+    return forecast_results, mae, rmse, r2, latest_value_from_api
+
+
 
 # Tkinter GUI setup
 def show_forecast():
-    city_input = city_entry.get().strip()
+    city_input = city_combobox.get().strip()
     if not city_input:
-        messagebox.showerror("Input Error", "Please enter a city name.")
+        messagebox.showerror("Input Error", "Please select a city.")
         return
 
     result = forecast_pm2_5(city_input)
@@ -198,12 +206,16 @@ def show_forecast():
         messagebox.showerror("Error", result["error"])
         return
 
-    forecast_results, mae, rmse, r2 = result
+    forecast_results, mae, rmse, r2, latest_value_from_api = result
 
+    # Display forecast and real-time PM2.5 in the output window
     output_text.delete(1.0, tk.END)
+    output_text.insert(tk.END, f"Real-time PM2.5 for {city_input.title()}: {latest_value_from_api:.2f} µg/m³\n")
     output_text.insert(tk.END, f"PM2.5 Forecast for {city_input.title()}:\n")
+    
     for day in forecast_results:
         output_text.insert(tk.END, f"{day['date']}: {day['predicted_pm2_5']} µg/m³ ({day['category']})\n")
+
     output_text.insert(tk.END, "\nPerformance Evaluation Metrics:\n")
     output_text.insert(tk.END, f"MAE: {mae:.2f}\nRMSE: {rmse:.2f}\nR²: {r2:.2f}")
 
@@ -228,9 +240,11 @@ def show_forecast():
 root = tk.Tk()
 root.title("PM2.5 Forecast")
 
-tk.Label(root, text="Enter a Philippine city:").pack(pady=5)
-city_entry = tk.Entry(root, width=40)
-city_entry.pack(pady=5)
+tk.Label(root, text="Select a Philippine city:").pack(pady=5)
+
+# Dropdown for city selection
+city_combobox = ttk.Combobox(root, values=cities_list, width=40)
+city_combobox.pack(pady=5)
 
 forecast_button = tk.Button(root, text="Get Forecast", command=show_forecast)
 forecast_button.pack(pady=10)
@@ -239,4 +253,3 @@ output_text = tk.Text(root, height=15, width=50)
 output_text.pack(pady=10)
 
 root.mainloop()
-# Note: Ensure that the required libraries (requests, pandas, lightgbm, scikit-learn, matplotlib) are installed in your Python environment.
