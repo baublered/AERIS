@@ -14,7 +14,7 @@
 - 🖥️ Simple and responsive desktop UI built with Tkinter.
 
 ---
-
+```
 ## 📂 Project Structure
 AERIS/
 ├── aeris_forecast.py # Core forecasting logic
@@ -24,7 +24,7 @@ AERIS/
 ├── cleaned_air_quality_data.csv # Historical dataset (Nov 2023 – April 2025)
 ├── city_coordinates_from_dataset.csv # City-to-coordinate mapping
 
-
+```
 ---
 
 ## ⚙️ How It Works
