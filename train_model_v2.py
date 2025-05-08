@@ -3,16 +3,21 @@ import lightgbm as lgb
 import pickle
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_squared_error, r2_score
+from sklearn.preprocessing import LabelEncoder
 
 # Load processed dataset
-df = pd.read_csv("processed_training_data.csv")
+df = pd.read_csv("final_dataset.csv")
+
+# Label encode the city_name column
+le = LabelEncoder()
+df['city_name'] = le.fit_transform(df['city_name'])
 
 # Load used features
 with open("used_features.pkl", "rb") as f:
     features = pickle.load(f)
 
 # Target and features
-target = "components.pm2_5"
+target = "main.aqi"
 X = df[features]
 y = df[target]
 
@@ -47,7 +52,7 @@ model = lgb.train(
 )
 
 # Save model
-with open("pm2_5_forecasting_model.pkl", "wb") as f:
+with open("aqi_forecasting_model.pkl", "wb") as f:
     pickle.dump(model, f)
 
 # Evaluate
@@ -55,6 +60,6 @@ y_pred = model.predict(X_test)
 rmse = mean_squared_error(y_test, y_pred, squared=False)
 r2 = r2_score(y_test, y_pred)
 
-print(f"✅ Model trained and saved as 'pm2_5_forecasting_model.pkl'")
+print(f"✅ Model trained and saved as 'aqi_forecasting_model.pkl'")
 print(f"📉 RMSE: {rmse:.2f}")
 print(f"📈 R² Score: {r2:.2f}")
