@@ -15,7 +15,7 @@ import matplotlib.dates as mdates
 
 # Load necessary files
 try:
-    with open('aqi_forecasting_model.pkl', 'rb') as f: # Assumes model is trained on 1-5 AQI scale
+    with open('aqi_forecasting_model.pkl', 'rb') as f: 
         model: Booster = pickle.load(f)
     with open('used_features.pkl', 'rb') as f:
         used_features = pickle.load(f)
@@ -53,7 +53,9 @@ def create_time_features(df):
     df['is_weekend'] = df['datetime'].dt.dayofweek.isin([5, 6]).astype(int)
     return df
 
-OPENWEATHERMAP_API_KEY = "046db00705c9a85bd3daa1f61ea04d4a" # Replace with your actual API key
+OPENWEATHERMAP_API_KEY = "046db00705c9a85bd3daa1f61ea04d4a" # Replace actual API key here
+# Ensure to set your OpenWeatherMap API key here
+# OpenWeatherMap API URL for air pollution data
 OPENWEATHERMAP_API_URL = "http://api.openweathermap.org/data/2.5/air_pollution"
 
 def fetch_realtime_air_data(city_name_input):
@@ -134,7 +136,7 @@ def forecast_aqi_logic(city):
         model_prediction_raw = model.predict(row_df_ordered)[0]
         # Process prediction: round to nearest int, clamp between 1 and 5
         predicted_aqi_value = round(float(model_prediction_raw))
-        predicted_aqi_value = max(1, min(5, predicted_aqi_value)) # Clamp to 1-5 range
+        ##predicted_aqi_value = max(1, min(5, predicted_aqi_value)) # Clamp to 1-5 range
 
         forecast_results_data.append({
             "date": future_date.isoformat(),

@@ -1,95 +1,77 @@
 import pandas as pd
 import pickle
-from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score, accuracy_score, confusion_matrix
+from sklearn.metrics import mean_squared_error, r2_score, accuracy_score, classification_report, confusion_matrix
+from sklearn.preprocessing import LabelEncoder
 import numpy as np
-import seaborn as sns
 import matplotlib.pyplot as plt
+import seaborn as sns
+
+# Load dataset and model
+df = pd.read_csv("final_dataset.csv")
+
+# Label encode 'city_name'
+le = LabelEncoder()
+df['city_name'] = le.fit_transform(df['city_name'])
+
+# Convert datetime
+df['datetime'] = pd.to_datetime(df['datetime']).dt.tz_localize(None)
 
 # Load model and features
 with open("aqi_forecasting_model.pkl", "rb") as f:
     model = pickle.load(f)
 
 with open("used_features.pkl", "rb") as f:
-    used_features = pickle.load(f)
+    features = pickle.load(f)
 
-# Load and prepare data
-df = pd.read_csv("final_dataset.csv")
-df['datetime'] = pd.to_datetime(df['datetime'])
+# Set target and features
+target = "main.aqi"
+X = df[features]
+y = df[target]
 
-# Label encode city_name to match training
-from sklearn.preprocessing import LabelEncoder
-le = LabelEncoder()
-df['city_name'] = le.fit_transform(df['city_name'])
+# Split data by datetime
+cutoff_date = pd.to_datetime("2024-12-25")
+train_mask = df["datetime"] < cutoff_date
+test_mask = df["datetime"] >= cutoff_date
 
-# Split into train/test
-train_df = df[df['datetime'] < "2024-12-25"]
-test_df = df[df['datetime'] >= "2024-12-25"]
+X_test = X[test_mask]
+y_test = y[test_mask]
 
-X_test = test_df[used_features]
-y_test = test_df['main.aqi']
-
-# Predict AQI
+# Predict
 y_pred = model.predict(X_test)
 
-# Regression metrics
-mae = mean_absolute_error(y_test, y_pred)
+# Round predictions to get AQI categories (1–5)
+y_pred_rounded = np.clip(np.round(y_pred), 1, 5).astype(int)
+
+# Metrics
 rmse = mean_squared_error(y_test, y_pred, squared=False)
 r2 = r2_score(y_test, y_pred)
+accuracy = accuracy_score(y_test, y_pred_rounded)
+conf_matrix = confusion_matrix(y_test, y_pred_rounded)
+report = classification_report(y_test, y_pred_rounded)
 
-print("📊 Regression Metrics:")
-print(f"MAE: {mae:.2f}")
-print(f"RMSE: {rmse:.2f}")
-print(f"R²: {r2:.2f}")
+# Print results
+print(f"📉 RMSE: {rmse:.2f}")
+print(f"📈 R² Score: {r2:.2f}")
+print(f"✅ Classification Accuracy: {accuracy:.2%}")
+print("\n📊 Classification Report:\n", report)
+print("\n🧩 Confusion Matrix:\n", conf_matrix)
 
-# 🔍 Plot 1: Actual vs Predicted
-plt.figure(figsize=(7, 5))
-sns.scatterplot(x=y_test, y=y_pred, alpha=0.3)
-plt.plot([y_test.min(), y_test.max()], [y_test.min(), y_test.max()], '--', color='red')
-plt.xlabel("Actual AQI")
-plt.ylabel("Predicted AQI")
-plt.title("Actual vs Predicted AQI")
-plt.tight_layout()
-plt.show()
-
-# 🔍 Plot 2: Residuals vs Predicted
+#---- for residuals ----
+# Compute residuals
 residuals = y_test - y_pred
-plt.figure(figsize=(7, 5))
-sns.scatterplot(x=y_pred, y=residuals, alpha=0.3)
-plt.axhline(0, color='red', linestyle='--')
-plt.xlabel("Predicted AQI")
-plt.ylabel("Residuals")
-plt.title("Residuals vs Predicted AQI")
-plt.tight_layout()
-plt.show()
 
-# AQI category classification (1-5 scale)
-def classify_aqi(aqi):
-    if aqi == 1:
-        return "Good"
-    elif aqi == 2:
-        return "Fair"
-    elif aqi == 3:
-        return "Moderate"
-    elif aqi == 4:
-        return "Poor"
-    else:
-        return "Very Poor"
+# Plot residuals
+plt.figure(figsize=(10, 6))
+sns.histplot(residuals, bins=30, kde=True, color="royalblue")
 
-# Convert predicted values to AQI categories
-y_true_class = y_test.apply(classify_aqi)
-y_pred_class = pd.Series(np.round(y_pred)).apply(lambda x: classify_aqi(int(x)))
+# Zero line
+plt.axvline(0, color='red', linestyle='dashed', linewidth=2, label='Perfect Prediction (Residual = 0)')
 
-# Classification metrics
-aqi_accuracy = accuracy_score(y_true_class, y_pred_class)
-print("\n🏷️ AQI Category Classification:")
-print(f"Accuracy: {aqi_accuracy * 100:.2f}%")
-
-# Confusion matrix
-labels = ["Good", "Fair", "Moderate", "Poor", "Very Poor"]
-cm = confusion_matrix(y_true_class, y_pred_class, labels=labels)
-sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", xticklabels=labels, yticklabels=labels)
-plt.xlabel("Predicted")
-plt.ylabel("Actual")
-plt.title("AQI Category Confusion Matrix")
+# Labels and title
+plt.title("Residual Distribution of AQI Predictions", fontsize=16)
+plt.xlabel("Residual (True AQI - Predicted AQI)", fontsize=12)
+plt.ylabel("Frequency", fontsize=12)
+plt.legend()
+plt.grid(True)
 plt.tight_layout()
 plt.show()
