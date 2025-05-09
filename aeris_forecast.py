@@ -53,7 +53,7 @@ def create_time_features(df):
     df['is_weekend'] = df['datetime'].dt.dayofweek.isin([5, 6]).astype(int)
     return df
 
-OPENWEATHERMAP_API_KEY = "046db00705c9a85bd3daa1f61ea04d4a" # Replace actual API key here
+OPENWEATHERMAP_API_KEY = "APIKEY" # Replace actual API key here
 # Ensure to set your OpenWeatherMap API key here
 # OpenWeatherMap API URL for air pollution data
 OPENWEATHERMAP_API_URL = "http://api.openweathermap.org/data/2.5/air_pollution"
