@@ -12,6 +12,8 @@ from tkinter import ttk
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import matplotlib.dates as mdates
+from collections import defaultdict
+
 
 # Load necessary files
 try:
@@ -77,6 +79,28 @@ def fetch_realtime_air_data(city_name_input):
     if 'list' not in data or not data['list'] or 'main' not in data['list'][0] or 'aqi' not in data['list'][0]['main']:
         raise ValueError(f"Unexpected API response format for {city_name_input}: 'main.aqi' missing.")
     return data['list'][0]['main']['aqi'] # This is an integer from 1 to 5
+
+def fetch_weather_forecast(lat, lon, api_key):
+    url = f"https://api.openweathermap.org/data/2.5/forecast?lat={lat}&lon={lon}&appid={api_key}&units=metric"
+    response = requests.get(url)
+    return response.json()
+
+def extract_daily_weather_averages(forecast_data):
+    daily_data = defaultdict(lambda: {'temp': [], 'humidity': [], 'wind': []})
+    for entry in forecast_data['list']:
+        dt = datetime.fromtimestamp(entry['dt'])
+        day_str = dt.date().isoformat()
+        daily_data[day_str]['temp'].append(entry['main']['temp'])
+        daily_data[day_str]['humidity'].append(entry['main']['humidity'])
+        daily_data[day_str]['wind'].append(entry['wind']['speed'])
+    daily_averages = {}
+    for day, vals in daily_data.items():
+        daily_averages[day] = {
+            'avg_temp': sum(vals['temp']) / len(vals['temp']),
+            'avg_humidity': sum(vals['humidity']) / len(vals['humidity']),
+            'avg_wind': sum(vals['wind']) / len(vals['wind']),
+        }
+    return daily_averages
 
 def forecast_aqi_logic(city):
     forecast_results_data = []
