@@ -72,7 +72,7 @@ def create_time_features(df):
     df['hour'] = df['datetime'].dt.hour
     return df
 
-OPENWEATHERMAP_API_KEY = "046db00705c9a85bd3daa1f61ea04d4a"
+OPENWEATHERMAP_API_KEY = "API KEY"
 OPENWEATHERMAP_API_URL = "http://api.openweathermap.org/data/2.5/air_pollution"
 
 def fetch_realtime_air_data(city_name_input):
